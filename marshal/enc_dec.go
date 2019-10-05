@@ -28,6 +28,29 @@ func (enc Enc) PutInts(xs []uint64) {
 	}
 }
 
+func (enc Enc) PutBool(b bool) {
+	off := *enc.off
+	if b {
+		enc.b[off] = 1
+	} else {
+		enc.b[off] = 0
+	}
+	*enc.off++
+}
+
+func (enc Enc) PutBytes(b []byte) {
+	off := *enc.off
+	for i := uint64(0); i < uint64(len(b)); i++ {
+		enc.b[off+i] = b[i]
+	}
+	*enc.off += uint64(len(b))
+}
+
+func (enc Enc) PutString(s string) {
+	enc.PutInt(uint64(len(s)))
+	enc.PutBytes([]byte(s))
+}
+
 func (enc Enc) Finish() disk.Block {
 	return enc.b
 }
@@ -54,4 +77,27 @@ func (dec Dec) GetInts(len int) []uint64 {
 		xs[i] = dec.GetInt()
 	}
 	return xs
+}
+
+func (dec Dec) GetBool() bool {
+	off := *dec.off
+	x := dec.b[off]
+	b := true
+	if x == 0 {
+		b = false
+	}
+	*dec.off++
+	return b
+}
+
+func (dec Dec) GetBytes(length uint64) []byte {
+	off := *dec.off
+	bs := dec.b[off : off+length]
+	*dec.off += length
+	return bs
+}
+
+func (dec Dec) GetString() string {
+	length := dec.GetInt()
+	return string(dec.GetBytes(length))
 }

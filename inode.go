@@ -14,11 +14,12 @@ const INODE_KIND_FILE uint64 = 2
 type Bnum = uint64
 
 // inodes fit into one block, so there are exactly
-// (4096-8-8)/8 = 510 direct blocks
-const NumDirect = 510
+// (4096-8-8-8)/8 = 509 direct blocks
+const NumDirect = (4096 - 8 - 8 - 8) / 8
 
 type inode struct {
 	Kind   uint64
+	Gen    uint64 // TODO: maintain this field
 	NBytes uint64
 	Direct []Bnum
 }
@@ -36,6 +37,7 @@ func encodeInode(ino inode) disk.Block {
 	}
 	enc := marshal.NewEnc()
 	enc.PutInt(ino.Kind)
+	enc.PutInt(ino.Gen)
 	enc.PutInt(ino.NBytes)
 	enc.PutInts(ino.Direct)
 	return enc.Finish()
@@ -45,6 +47,7 @@ func decodeInode(b disk.Block) inode {
 	ino := inode{}
 	dec := marshal.NewDec(b)
 	ino.Kind = dec.GetInt()
+	ino.Gen = dec.GetInt()
 	ino.NBytes = dec.GetInt()
 	ino.Direct = dec.GetInts(NumDirect)
 	return ino

@@ -18,6 +18,7 @@ type SuperBlock struct {
 
 	// in-memory
 	blockAllocBase uint64
+	rootInode      Inum
 	inodeBase      uint64
 	numInodes      uint64
 	dataBase       uint64
@@ -26,6 +27,7 @@ type SuperBlock struct {
 
 func (sb *SuperBlock) computeFields() {
 	sb.blockAllocBase = 1
+	sb.rootInode = 1
 	sb.inodeBase = sb.blockAllocBase + sb.NumBlockBitmaps
 	sb.numInodes = sb.NumInodes
 	sb.dataBase = sb.inodeBase + sb.numInodes
@@ -42,7 +44,7 @@ func NewSuperBlock(diskSize uint64) *SuperBlock {
 	if diskSize < 10 {
 		panic("disk too small")
 	}
-	numInodes := diskSize / 4
+	numInodes := (diskSize - 1 - 1) / 4
 	blockBitmaps := divUp(diskSize-1-numInodes, balloc.ItemsPerBitmap)
 	sb := &SuperBlock{
 		NumInodes:       numInodes,
@@ -81,8 +83,10 @@ func NewFs(log *awol.Log) Fs {
 	op.Write(0, encodeSuperBlock(sb))
 	blockA.Flush(op, sb.blockAllocBase)
 
+	op.Write(sb.inodeBase+(sb.rootInode-1),
+		encodeInode(newInode(INODE_KIND_DIR)))
 	freeInode := encodeInode(newInode(INODE_KIND_FREE))
-	for i := Inum(1); i < sb.numInodes; i++ {
+	for i := Inum(2); i < sb.numInodes; i++ {
 		op.Write(sb.inodeBase+(i-1), freeInode)
 	}
 	log.Commit(op)
@@ -114,21 +118,25 @@ func (ino inode) btoa(boff uint64) Bnum {
 	return ino.Direct[boff]
 }
 
-func (ino inode) readBlock(fs Fs, boff uint64) disk.Block {
+func (fs Fs) inodeRead(ino inode, boff uint64) disk.Block {
 	return fs.log.Read(fs.sb.inodeBase + ino.btoa(boff))
 }
 
-func (ino inode) putBlock(fs Fs, op *awol.Op, boff uint64, b disk.Block) {
+func (fs Fs) inodeWrite(op *awol.Op, ino inode, boff uint64, b disk.Block) {
 	op.Write(fs.sb.inodeBase+ino.btoa(boff), b)
 }
 
-func (fs Fs) getInode(i Inum) inode {
+func (fs Fs) checkInode(i Inum) {
 	if i == 0 {
 		panic("0 is an invalid inode number")
 	}
 	if i > fs.sb.numInodes {
 		panic("invalid inode number")
 	}
+}
+
+func (fs Fs) getInode(i Inum) inode {
+	fs.checkInode(i)
 	b := fs.log.Read(fs.sb.inodeBase + (i - 1))
 	return decodeInode(b)
 }
@@ -189,4 +197,84 @@ func (fs Fs) shrinkInode(op *awol.Op, ino inode, newLen uint64) {
 	// TODO: same problem as in growInode of flushing the allocator
 	fs.flushBalloc(op, blockA)
 	ino.NBytes = newLen
+}
+
+func (fs Fs) lookupDir(dir inode, name string) Inum {
+	if dir.Kind != INODE_KIND_DIR {
+		panic("lookup on non-dir inode")
+	}
+	// invariant: directories always have length a multiple of BlockSize
+	blocks := dir.NBytes / disk.BlockSize
+	for b := uint64(0); b < blocks; b++ {
+		de := decodeDirEnt(fs.inodeRead(dir, b))
+		if !de.Valid {
+			continue
+		}
+		if de.Name == name {
+			return de.I
+		}
+	}
+	return 0
+}
+
+func (fs Fs) findFreeDirEnt(op *awol.Op, dir inode) (uint64, bool) {
+	// invariant: directories always have length a multiple of BlockSize
+	blocks := dir.NBytes / disk.BlockSize
+	for b := uint64(0); b < blocks; b++ {
+		de := decodeDirEnt(fs.inodeRead(dir, b))
+		if !de.Valid {
+			return b, false
+		}
+	}
+	// nothing free, allocate a new one
+	ok := fs.growInode(op, dir, dir.NBytes+disk.BlockSize)
+	if !ok {
+		return 0, false
+	}
+	return blocks, false
+}
+
+// createDir creates a pointer name to i in the directory dir
+//
+// returns false if this fails (eg, due to allocation failure)
+func (fs Fs) createDir(op *awol.Op, dir inode, name string, i Inum) bool {
+	if dir.Kind != INODE_KIND_DIR {
+		panic("create on non-dir inode")
+	}
+	fs.checkInode(i)
+	b, ok := fs.findFreeDirEnt(op, dir)
+	if !ok {
+		return false
+	}
+	fs.inodeWrite(op, dir, b, encodeDirEnt(&DirEnt{
+		Valid: true,
+		Name:  name,
+		I:     i,
+	}))
+	return true
+}
+
+// removeLink removes the link from name in dir
+//
+// returns true if a link was removed, false if name was not found
+func (fs Fs) removeLink(op *awol.Op, dir inode, name string) bool {
+	if dir.Kind != INODE_KIND_DIR {
+		panic("remove on non-dir inode")
+	}
+	blocks := dir.NBytes / disk.BlockSize
+	for b := uint64(0); b < blocks; b++ {
+		de := decodeDirEnt(fs.inodeRead(dir, b))
+		if !de.Valid {
+			continue
+		}
+		if de.Name == name {
+			fs.inodeWrite(op, dir, b, encodeDirEnt(&DirEnt{
+				Valid: false,
+				Name:  "",
+				I:     0,
+			}))
+			return true
+		}
+	}
+	return false
 }
