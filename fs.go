@@ -69,9 +69,8 @@ func decodeSuperBlock(b disk.Block) *SuperBlock {
 }
 
 type Fs struct {
-	log    *awol.Log
-	sb     *SuperBlock
-	blockA balloc.Bitmap
+	log *awol.Log
+	sb  *SuperBlock
 }
 
 func NewFs(log *awol.Log) Fs {
@@ -87,17 +86,22 @@ func NewFs(log *awol.Log) Fs {
 		op.Write(sb.inodeBase+(i-1), freeInode)
 	}
 	log.Commit(op)
-	return Fs{log: log, sb: sb, blockA: blockA}
+	return Fs{log: log, sb: sb}
 }
 
 func OpenFs(log *awol.Log) Fs {
 	sb := decodeSuperBlock(log.Read(0))
-	blockA := balloc.Open(log, sb.blockAllocBase, int(sb.NumBlockBitmaps))
-	return Fs{log: log, sb: sb, blockA: blockA}
+	return Fs{log: log, sb: sb}
 }
 
-func (fs Fs) flushBalloc(op *awol.Op) {
-	fs.blockA.Flush(op, fs.sb.blockAllocBase)
+func (fs Fs) readBalloc() balloc.Bitmap {
+	return balloc.Open(fs.log,
+		fs.sb.blockAllocBase,
+		int(fs.sb.NumBlockBitmaps))
+}
+
+func (fs Fs) flushBalloc(op *awol.Op, bm balloc.Bitmap) {
+	bm.Flush(op, fs.sb.blockAllocBase)
 }
 
 // btoa translates an offset in an inode to a block number
@@ -153,21 +157,20 @@ func (fs Fs) growInode(op *awol.Op, ino inode, newLen uint64) bool {
 	if newBlks > NumDirect {
 		return false
 	}
+	blockA := fs.readBalloc()
 	for b := oldBlks; b < newBlks; b++ {
-		newB := fs.blockA.Alloc()
-		if newB >= fs.blockA.Size() {
-			// TODO: this leaves the allocator and inode in an inconsistent
-			//  state; it's easy to throw away the inode,
-			//  but the changes to the allocator are harder to revert.
-			//
-			// maybe we should allocate all the blocks in the
-			// allocator? or just operate on a copy?
+		newB := blockA.Alloc()
+		if newB >= blockA.Size() {
 			return false
 		}
 		ino.Direct[b] = newB
 	}
+	// TODO: it's brittle that we've modified the allocator only in the
+	//  transaction; reading your own writes would make this easier to
+	//  implement, but I'm not sure it makes the abstraction and invariants
+	//  easier.
+	fs.flushBalloc(op, blockA)
 	ino.NBytes = newLen
-	// inode and block allocator are dirty
 	return true
 }
 
@@ -177,10 +180,13 @@ func (fs Fs) shrinkInode(op *awol.Op, ino inode, newLen uint64) {
 	}
 	oldBlks := divUp(ino.NBytes, disk.BlockSize)
 	newBlks := divUp(newLen, disk.BlockSize)
+	blockA := fs.readBalloc()
 	// newBlks <= oldBlks
 	for b := newBlks; b <= oldBlks; b++ {
 		oldB := ino.btoa(b)
-		fs.blockA.Free(oldB)
+		blockA.Free(oldB)
 	}
+	// TODO: same problem as in growInode of flushing the allocator
+	fs.flushBalloc(op, blockA)
 	ino.NBytes = newLen
 }
