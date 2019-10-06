@@ -14,7 +14,7 @@ type FsSuite struct {
 }
 
 func (suite *FsSuite) SetupTest() {
-	disk.Init(disk.NewMemDisk(10_000))
+	disk.Init(disk.NewMemDisk(10 * 1000))
 	log := awol.New()
 	suite.fs = NewFs(log)
 }
