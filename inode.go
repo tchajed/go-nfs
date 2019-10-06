@@ -17,6 +17,11 @@ type Bnum = uint64
 // (4096-8-8-8)/8 = 509 direct blocks
 const NumDirect = (4096 - 8 - 8 - 8) / 8
 
+type Attr struct {
+	// TODO: should probably store at least some permission attributes
+	IsDir bool
+}
+
 type inode struct {
 	Kind   uint64
 	Gen    uint64 // TODO: maintain this field

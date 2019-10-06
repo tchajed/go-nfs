@@ -1,6 +1,9 @@
 package nfs
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/tchajed/go-awol"
 	"github.com/tchajed/goose/machine/disk"
 
@@ -78,18 +81,23 @@ type Fs struct {
 func NewFs(log *awol.Log) Fs {
 	sb := NewSuperBlock(uint64(log.Size()))
 	blockA := balloc.Init(int(sb.NumBlockBitmaps))
-	op := log.Begin()
 
+	op := log.Begin()
 	op.Write(0, encodeSuperBlock(sb))
 	blockA.Flush(op, sb.blockAllocBase)
+	log.Commit(op)
 
+	op = log.Begin()
 	op.Write(sb.inodeBase+(sb.rootInode-1),
 		encodeInode(newInode(INODE_KIND_DIR)))
+	log.Commit(op)
+
 	freeInode := encodeInode(newInode(INODE_KIND_FREE))
 	for i := Inum(2); i < sb.numInodes; i++ {
+		op := log.Begin()
 		op.Write(sb.inodeBase+(i-1), freeInode)
+		log.Commit(op)
 	}
-	log.Commit(op)
 	return Fs{log: log, sb: sb}
 }
 
@@ -173,12 +181,16 @@ func (fs Fs) growInode(op *awol.Op, ino inode, newLen uint64) bool {
 		}
 		ino.Direct[b] = newB
 	}
-	// TODO: it's brittle that we've modified the allocator only in the
-	//  transaction; reading your own writes would make this easier to
-	//  implement, but I'm not sure it makes the abstraction and invariants
-	//  easier.
+	// TODO: it's brittle (and incorrect for concurrent allocation) that we've
+	//   modified the allocator only in the transaction; reading your own writes
+	//   would make this easier to implement, but I'm not sure it makes the
+	//   abstraction and invariants easier.
 	fs.flushBalloc(op, blockA)
 	ino.NBytes = newLen
+	// TODO: leaves the inode dirty, caller must flush
+	//
+	// we should be able to flush it if we knew its inode number, potentially
+	// relying on absorption within the transaction
 	return true
 }
 
@@ -223,7 +235,7 @@ func (fs Fs) findFreeDirEnt(op *awol.Op, dir inode) (uint64, bool) {
 	for b := uint64(0); b < blocks; b++ {
 		de := decodeDirEnt(fs.inodeRead(dir, b))
 		if !de.Valid {
-			return b, false
+			return b, true
 		}
 	}
 	// nothing free, allocate a new one
@@ -231,7 +243,8 @@ func (fs Fs) findFreeDirEnt(op *awol.Op, dir inode) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return blocks, false
+	// return the newly-allocated index
+	return blocks, true
 }
 
 // createLink creates a pointer name to i in the directory dir
@@ -244,6 +257,7 @@ func (fs Fs) createLink(op *awol.Op, dir inode, name string, i Inum) bool {
 	fs.checkInode(i)
 	b, ok := fs.findFreeDirEnt(op, dir)
 	if !ok {
+		fmt.Fprintln(os.Stderr, "createLink: no more space")
 		return false
 	}
 	fs.inodeWrite(op, dir, b, encodeDirEnt(&DirEnt{
@@ -321,20 +335,47 @@ func (fs Fs) Lookup(i Inum, name string) Inum {
 	return fs.lookupDir(dir, name)
 }
 
+func (fs Fs) GetAttr(i Inum) (Attr, bool) {
+	ino := fs.getInode(i)
+	if ino.Kind == INODE_KIND_FREE {
+		return Attr{}, false
+	}
+	return Attr{IsDir: ino.Kind == INODE_KIND_DIR}, true
+}
+
 func (fs Fs) Create(dirI Inum, name string, unchecked bool) (Inum, bool) {
 	op := fs.log.Begin()
 	dir := fs.getInode(dirI)
-	if unchecked {
-		fs.removeLink(op, dir, name)
+	fmt.Printf("directory %d: %v\n", dirI, dir)
+	if dir.Kind != INODE_KIND_DIR {
+		fmt.Fprintf(os.Stderr, "Create: %d is not a dir\n", dirI)
+		return 0, false
+	}
+	existingI := fs.lookupDir(dir, name)
+	if existingI != 0 {
+		if unchecked {
+			ino := fs.getInode(existingI)
+			if ino.Kind == INODE_KIND_DIR {
+				fmt.Fprintln(os.Stderr, "dir not empty")
+				return 0, false
+			}
+			fs.removeLink(op, dir, name)
+		} else {
+			// checked, fail early
+			return 0, false
+		}
 	}
 	i, ino := fs.findFreeInode()
 	if i == 0 {
+		fmt.Fprintln(os.Stderr, "no space left")
 		return 0, false
 	}
 	ok := fs.createLink(op, dir, name, i)
 	if !ok {
+		fmt.Fprintln(os.Stderr, "could not create link")
 		return 0, false
 	}
+	fs.flushInode(op, dirI, dir)
 	ino.Kind = INODE_KIND_FILE
 	fs.flushInode(op, i, ino)
 	fs.log.Commit(op)
@@ -344,6 +385,10 @@ func (fs Fs) Create(dirI Inum, name string, unchecked bool) (Inum, bool) {
 func (fs Fs) Mkdir(dirI Inum, name string) (Inum, bool) {
 	op := fs.log.Begin()
 	dir := fs.getInode(dirI)
+	if dir.Kind != INODE_KIND_DIR {
+		fmt.Fprintf(os.Stderr, "Mkdir: %d is not a dir\n", dirI)
+		return 0, false
+	}
 	i, ino := fs.findFreeInode()
 	if i == 0 {
 		return 0, false
@@ -353,6 +398,7 @@ func (fs Fs) Mkdir(dirI Inum, name string) (Inum, bool) {
 	if !ok {
 		return 0, false
 	}
+	fs.flushInode(op, dirI, dir)
 	fs.flushInode(op, i, ino)
 	fs.log.Commit(op)
 	return i, true
@@ -415,6 +461,7 @@ func (fs Fs) Write(i Inum, off uint64, bs []byte) bool {
 			off += disk.BlockSize
 		}
 	}
+	fs.flushInode(op, i, ino)
 	fs.log.Commit(op)
 	return true
 }
@@ -441,10 +488,12 @@ func (fs Fs) Remove(dirI Inum, name string) bool {
 			return false
 		}
 	}
+	fs.flushInode(op, i, inode{Kind: INODE_KIND_FREE})
 	ok := fs.removeLink(op, dir, name)
 	if !ok {
 		return false
 	}
+	fs.flushInode(op, dirI, dir)
 	fs.log.Commit(op)
 	return true
 }
