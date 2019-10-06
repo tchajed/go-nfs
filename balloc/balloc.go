@@ -39,8 +39,8 @@ func Open(log *awol.Log, at uint64, blocks int) Bitmap {
 // (off fits in the abstract size of the bitmap)
 func (bm Bitmap) Free(off uint64) {
 	blockIndex := off / ItemsPerBitmap
-	byteIndex := (off % ItemsPerBitmap) / 4096
-	bitIndex := ((off % ItemsPerBitmap) % 4096) / 8
+	byteIndex := (off / 8) % 4096
+	bitIndex := off % 8
 	bm[blockIndex][byteIndex] = bm[blockIndex][byteIndex] & ^(1 << bitIndex)
 }
 
@@ -52,17 +52,23 @@ func (bm Bitmap) Size() uint64 {
 //
 // modifies bm to mark the item allocated
 //
-// returns an out-of-bounds off (bm.Size()) if the bitmap is full
-func (bm Bitmap) Alloc() uint64 {
-	for off := uint64(0); off < bm.Size(); off++ {
-		blockIndex := off / ItemsPerBitmap
+// boolean status is false if allocator is full
+func (bm Bitmap) Alloc() (uint64, bool) {
+	for blockIndex := uint64(0); blockIndex < uint64(len(bm)); blockIndex++ {
 		b := bm[blockIndex]
-		byteIndex := (off % ItemsPerBitmap) / 4096
-		bitIndex := ((off % ItemsPerBitmap) % 4096) / 8
-		if b[byteIndex]&(1<<bitIndex) != 0 {
-			b[byteIndex] |= 1 << bitIndex
-			return off
+		for byteIndex := uint64(0); byteIndex < uint64(len(b)); byteIndex++ {
+			byteVal := b[byteIndex]
+			if byteVal == 0xff {
+				continue
+			}
+			for bitIndex := uint64(0); bitIndex < 8; bitIndex++ {
+				if byteVal&(1<<bitIndex) == 0 {
+					b[byteIndex] |= 1 << bitIndex
+					off := bitIndex + 8*byteIndex + ItemsPerBitmap*blockIndex
+					return off, true
+				}
+			}
 		}
 	}
-	return bm.Size()
+	return 0, false
 }

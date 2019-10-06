@@ -167,8 +167,8 @@ func (fs Fs) growInode(op *awol.Op, ino inode, newLen uint64) bool {
 	}
 	blockA := fs.readBalloc()
 	for b := oldBlks; b < newBlks; b++ {
-		newB := blockA.Alloc()
-		if newB >= blockA.Size() {
+		newB, ok := blockA.Alloc()
+		if !ok {
 			return false
 		}
 		ino.Direct[b] = newB
