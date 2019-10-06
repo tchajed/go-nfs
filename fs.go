@@ -234,10 +234,10 @@ func (fs Fs) findFreeDirEnt(op *awol.Op, dir inode) (uint64, bool) {
 	return blocks, false
 }
 
-// createDir creates a pointer name to i in the directory dir
+// createLink creates a pointer name to i in the directory dir
 //
 // returns false if this fails (eg, due to allocation failure)
-func (fs Fs) createDir(op *awol.Op, dir inode, name string, i Inum) bool {
+func (fs Fs) createLink(op *awol.Op, dir inode, name string, i Inum) bool {
 	if dir.Kind != INODE_KIND_DIR {
 		panic("create on non-dir inode")
 	}
@@ -277,4 +277,174 @@ func (fs Fs) removeLink(op *awol.Op, dir inode, name string) bool {
 		}
 	}
 	return false
+}
+
+func (fs Fs) isDirEmpty(dir inode) bool {
+	if dir.Kind != INODE_KIND_DIR {
+		panic("remove on non-dir inode")
+	}
+	blocks := dir.NBytes / disk.BlockSize
+	for b := uint64(0); b < blocks; b++ {
+		de := decodeDirEnt(fs.inodeRead(dir, b))
+		if de.Valid {
+			return false
+		}
+	}
+	return true
+}
+
+// readDirEntries reads all of the entries in dir
+//
+// NFS's readdir operation has a more sophisticated cookie/cookie verifier
+// mechanism for paging and reporting iterator invalidation.
+func (fs Fs) readDirEntries(dir inode) []string {
+	names := make([]string, 0)
+	blocks := dir.NBytes / disk.BlockSize
+	for b := uint64(0); b < blocks; b++ {
+		de := decodeDirEnt(fs.inodeRead(dir, b))
+		if !de.Valid {
+			continue
+		}
+		names = append(names, de.Name)
+	}
+	return names
+}
+
+// file-system API
+
+func (fs Fs) RootInode() Inum {
+	return fs.sb.rootInode
+}
+
+func (fs Fs) Lookup(i Inum, name string) Inum {
+	dir := fs.getInode(i)
+	return fs.lookupDir(dir, name)
+}
+
+func (fs Fs) Create(dirI Inum, name string, unchecked bool) (Inum, bool) {
+	op := fs.log.Begin()
+	dir := fs.getInode(dirI)
+	if unchecked {
+		fs.removeLink(op, dir, name)
+	}
+	i, ino := fs.findFreeInode()
+	if i == 0 {
+		return 0, false
+	}
+	ok := fs.createLink(op, dir, name, i)
+	if !ok {
+		return 0, false
+	}
+	ino.Kind = INODE_KIND_FILE
+	fs.flushInode(op, i, ino)
+	fs.log.Commit(op)
+	return i, true
+}
+
+func (fs Fs) Mkdir(dirI Inum, name string) (Inum, bool) {
+	op := fs.log.Begin()
+	dir := fs.getInode(dirI)
+	i, ino := fs.findFreeInode()
+	if i == 0 {
+		return 0, false
+	}
+	ino.Kind = INODE_KIND_DIR
+	ok := fs.createLink(op, dir, name, i)
+	if !ok {
+		return 0, false
+	}
+	fs.flushInode(op, i, ino)
+	fs.log.Commit(op)
+	return i, true
+}
+
+func (fs Fs) Read(i Inum, off uint64, length uint64) ([]byte, bool) {
+	ino := fs.getInode(i)
+	if ino.Kind != INODE_KIND_FILE {
+		return nil, false
+	}
+	if off+length > ino.NBytes {
+		return nil, false
+	}
+	bs := make([]byte, 0, length)
+	for boff := off / disk.BlockSize; length > 0; boff++ {
+		b := fs.inodeRead(ino, boff)
+		if off%disk.BlockSize != 0 {
+			byteOff := off % disk.BlockSize
+			b = b[byteOff:]
+		}
+		if length < uint64(len(b)) {
+			b = b[:length]
+		}
+		bs = append(bs, b...)
+		length -= uint64(len(b))
+	}
+	return bs, true
+}
+
+func (fs Fs) Write(i Inum, off uint64, bs []byte) bool {
+	op := fs.log.Begin()
+	ino := fs.getInode(i)
+	if ino.Kind != INODE_KIND_FILE {
+		return false
+	}
+	for boff := off / disk.BlockSize; len(bs) > 0; boff++ {
+		if off%disk.BlockSize != 0 {
+			b := fs.inodeRead(ino, boff)
+			byteOff := off % disk.BlockSize
+			nBytes := disk.BlockSize - byteOff
+			if uint64(len(bs)) < nBytes {
+				nBytes = uint64(len(bs))
+			}
+			for i := byteOff; i < nBytes; i++ {
+				b[byteOff+i] = bs[i]
+			}
+			fs.inodeWrite(op, ino, boff, b)
+			bs = bs[nBytes:]
+			off += nBytes
+		} else if uint64(len(bs)) < disk.BlockSize {
+			b := fs.inodeRead(ino, boff)
+			for i := 0; i < len(bs); i++ {
+				b[i] = bs[i]
+			}
+			fs.inodeWrite(op, ino, boff, b)
+			bs = nil
+		} else {
+			fs.inodeWrite(op, ino, boff, disk.Block(bs[:disk.BlockSize]))
+			bs = bs[disk.BlockSize:]
+			off += disk.BlockSize
+		}
+	}
+	fs.log.Commit(op)
+	return true
+}
+
+func (fs Fs) Readdir(i Inum) []string {
+	dir := fs.getInode(i)
+	return fs.readDirEntries(dir)
+}
+
+func (fs Fs) Remove(dirI Inum, name string) bool {
+	op := fs.log.Begin()
+	dir := fs.getInode(dirI)
+	i := fs.lookupDir(dir, name)
+	if i == 0 {
+		return false
+	}
+	ino := fs.getInode(i)
+	if ino.Kind == INODE_KIND_FREE {
+		panic("directory entries should point to valid inodes")
+	}
+	if ino.Kind == INODE_KIND_DIR {
+		if !fs.isDirEmpty(ino) {
+			// cannot unlink non-empty directory
+			return false
+		}
+	}
+	ok := fs.removeLink(op, dir, name)
+	if !ok {
+		return false
+	}
+	fs.log.Commit(op)
+	return true
 }
