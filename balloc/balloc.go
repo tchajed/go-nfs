@@ -23,11 +23,7 @@ func (bm Bitmap) Flush(op *awol.Op, at uint64) {
 	}
 }
 
-func Open(log *awol.Log, at uint64, blocks int) Bitmap {
-	bm := make(Bitmap, blocks)
-	for i := 0; i < blocks; i++ {
-		bm[i] = log.Read(at + uint64(i))
-	}
+func Open(bm []disk.Block) Bitmap {
 	return bm
 }
 

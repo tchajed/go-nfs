@@ -1,11 +1,11 @@
 package nfs
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
-	"github.com/tchajed/go-awol"
-	"github.com/tchajed/goose/machine/disk"
+	"github.com/tchajed/go-awol/mem"
 )
 
 type FsSuite struct {
@@ -14,8 +14,7 @@ type FsSuite struct {
 }
 
 func (suite *FsSuite) SetupTest() {
-	disk.Init(disk.NewMemDisk(10 * 1000))
-	log := awol.New()
+	log := mem.New(10 * 1000)
 	suite.fs = NewFs(log)
 }
 
@@ -29,6 +28,7 @@ func (suite *FsSuite) TestGetRoot() {
 
 func (suite *FsSuite) TestCreateFile() {
 	fs := suite.fs
+	fmt.Printf("fs: %+v\n", fs.sb)
 	root := fs.RootInode()
 	i1, ok := fs.Create(root, "foo", false)
 	suite.Require().True(ok)
@@ -70,7 +70,7 @@ func (suite *FsSuite) TestCreateDir() {
 // TODO: something is seriously wrong that breaks this test
 //
 // we don't seem to correctly allocate new directory entry blocks to directories
-func (suite *FsSuite) IgnoreTestCreateFileOverwriteFiles() {
+func (suite *FsSuite) TestUncheckedCreate() {
 	fs := suite.fs
 	root := fs.RootInode()
 	_, ok := fs.Create(root, "foo", false)

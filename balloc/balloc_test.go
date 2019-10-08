@@ -71,7 +71,11 @@ func (suite *BallocSuite) TestFlushReopen() {
 	op := suite.log.Begin()
 	alloc.Flush(op, 1)
 	suite.log.Commit(op)
-	alloc = Open(suite.log, 1, 3)
+	bs := make([]disk.Block, 3)
+	for i := uint64(0); i < 3; i++ {
+		bs[i] = suite.log.Read(1 + i)
+	}
+	alloc = Open(bs)
 	// this is the only test that assumes identifiers are returned in order
 	suite.Equal(uint64(10), suite.fresh(alloc))
 	suite.Equal(uint64(22), suite.fresh(alloc))

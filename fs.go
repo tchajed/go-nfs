@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/tchajed/go-awol"
+	"github.com/tchajed/go-awol/mem"
 	"github.com/tchajed/goose/machine/disk"
 
 	"github.com/tchajed/go-nfs/balloc"
@@ -73,12 +74,20 @@ func decodeSuperBlock(b disk.Block) *SuperBlock {
 	return sb
 }
 
+type Log interface {
+	Read(a uint64) disk.Block
+	Size() int
+	Begin() *awol.Op
+	Commit(op *awol.Op)
+	Apply()
+}
+
 type Fs struct {
-	log *awol.Log
+	log Log
 	sb  *SuperBlock
 }
 
-func NewFs(log *awol.Log) Fs {
+func NewFs(log Log) Fs {
 	sb := NewSuperBlock(uint64(log.Size()))
 	blockA := balloc.Init(int(sb.NumBlockBitmaps))
 
@@ -92,24 +101,28 @@ func NewFs(log *awol.Log) Fs {
 		encodeInode(newInode(INODE_KIND_DIR)))
 	log.Commit(op)
 
+	mem.Debug = false
 	freeInode := encodeInode(newInode(INODE_KIND_FREE))
 	for i := Inum(2); i < sb.numInodes; i++ {
 		op := log.Begin()
 		op.Write(sb.inodeBase+(i-1), freeInode)
 		log.Commit(op)
 	}
+	mem.Debug = true
 	return Fs{log: log, sb: sb}
 }
 
-func OpenFs(log *awol.Log) Fs {
+func OpenFs(log Log) Fs {
 	sb := decodeSuperBlock(log.Read(0))
 	return Fs{log: log, sb: sb}
 }
 
 func (fs Fs) readBalloc() balloc.Bitmap {
-	return balloc.Open(fs.log,
-		fs.sb.blockAllocBase,
-		int(fs.sb.NumBlockBitmaps))
+	bs := make([]disk.Block, fs.sb.NumBlockBitmaps)
+	for i := 0; i < len(bs); i++ {
+		bs[i] = fs.log.Read(fs.sb.blockAllocBase + uint64(i))
+	}
+	return balloc.Open(bs)
 }
 
 func (fs Fs) flushBalloc(op *awol.Op, bm balloc.Bitmap) {
@@ -346,7 +359,6 @@ func (fs Fs) GetAttr(i Inum) (Attr, bool) {
 func (fs Fs) Create(dirI Inum, name string, unchecked bool) (Inum, bool) {
 	op := fs.log.Begin()
 	dir := fs.getInode(dirI)
-	fmt.Printf("directory %d: %v\n", dirI, dir)
 	if dir.Kind != INODE_KIND_DIR {
 		fmt.Fprintf(os.Stderr, "Create: %d is not a dir\n", dirI)
 		return 0, false
