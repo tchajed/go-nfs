@@ -156,28 +156,30 @@ func (fs Fs) checkInode(i Inum) {
 	}
 }
 
-func (fs Fs) getInode(i Inum) inode {
+func (fs Fs) getInode(i Inum) *inode {
 	fs.checkInode(i)
 	b := fs.log.Read(fs.sb.inodeBase + (i - 1))
-	return decodeInode(b)
+	ino := new(inode)
+	*ino = decodeInode(b)
+	return ino
 }
 
-func (fs Fs) findFreeInode() (Inum, inode) {
+func (fs Fs) findFreeInode() (Inum, *inode) {
 	for i := uint64(1); i <= fs.sb.numInodes; i++ {
 		ino := fs.getInode(i)
 		if ino.Kind == INODE_KIND_FREE {
 			return i, ino
 		}
 	}
-	return 0, inode{}
+	return 0, nil
 }
 
-func (fs Fs) flushInode(op *awol.Op, i Inum, ino inode) {
-	op.Write(fs.sb.inodeBase+(i-1), encodeInode(ino))
+func (fs Fs) flushInode(op *awol.Op, i Inum, ino *inode) {
+	op.Write(fs.sb.inodeBase+(i-1), encodeInode(*ino))
 }
 
 // returns false if grow failed (eg, due to inode size or running out of blocks)
-func (fs Fs) growInode(op *awol.Op, ino inode, newLen uint64) bool {
+func (fs Fs) growInode(op *awol.Op, ino *inode, newLen uint64) bool {
 	if !(ino.NBytes <= newLen) {
 		panic("growInode requires a larger length")
 	}
@@ -207,7 +209,7 @@ func (fs Fs) growInode(op *awol.Op, ino inode, newLen uint64) bool {
 	return true
 }
 
-func (fs Fs) shrinkInode(op *awol.Op, ino inode, newLen uint64) {
+func (fs Fs) shrinkInode(op *awol.Op, ino *inode, newLen uint64) {
 	if !(newLen <= ino.NBytes) {
 		panic("shrinkInode requires a smaller length")
 	}
@@ -224,7 +226,7 @@ func (fs Fs) shrinkInode(op *awol.Op, ino inode, newLen uint64) {
 	ino.NBytes = newLen
 }
 
-func (fs Fs) lookupDir(dir inode, name string) Inum {
+func (fs Fs) lookupDir(dir *inode, name string) Inum {
 	if dir.Kind != INODE_KIND_DIR {
 		panic("lookup on non-dir inode")
 	}
@@ -242,7 +244,7 @@ func (fs Fs) lookupDir(dir inode, name string) Inum {
 	return 0
 }
 
-func (fs Fs) findFreeDirEnt(op *awol.Op, dir inode) (uint64, bool) {
+func (fs Fs) findFreeDirEnt(op *awol.Op, dir *inode) (uint64, bool) {
 	// invariant: directories always have length a multiple of BlockSize
 	blocks := dir.NBytes / disk.BlockSize
 	for b := uint64(0); b < blocks; b++ {
@@ -263,7 +265,7 @@ func (fs Fs) findFreeDirEnt(op *awol.Op, dir inode) (uint64, bool) {
 // createLink creates a pointer name to i in the directory dir
 //
 // returns false if this fails (eg, due to allocation failure)
-func (fs Fs) createLink(op *awol.Op, dir inode, name string, i Inum) bool {
+func (fs Fs) createLink(op *awol.Op, dir *inode, name string, i Inum) bool {
 	if dir.Kind != INODE_KIND_DIR {
 		panic("create on non-dir inode")
 	}
@@ -284,7 +286,7 @@ func (fs Fs) createLink(op *awol.Op, dir inode, name string, i Inum) bool {
 // removeLink removes the link from name in dir
 //
 // returns true if a link was removed, false if name was not found
-func (fs Fs) removeLink(op *awol.Op, dir inode, name string) bool {
+func (fs Fs) removeLink(op *awol.Op, dir *inode, name string) bool {
 	if dir.Kind != INODE_KIND_DIR {
 		panic("remove on non-dir inode")
 	}
@@ -306,7 +308,7 @@ func (fs Fs) removeLink(op *awol.Op, dir inode, name string) bool {
 	return false
 }
 
-func (fs Fs) isDirEmpty(dir inode) bool {
+func (fs Fs) isDirEmpty(dir *inode) bool {
 	if dir.Kind != INODE_KIND_DIR {
 		panic("remove on non-dir inode")
 	}
@@ -324,7 +326,7 @@ func (fs Fs) isDirEmpty(dir inode) bool {
 //
 // NFS's readdir operation has a more sophisticated cookie/cookie verifier
 // mechanism for paging and reporting iterator invalidation.
-func (fs Fs) readDirEntries(dir inode) []string {
+func (fs Fs) readDirEntries(dir *inode) []string {
 	names := make([]string, 0)
 	blocks := dir.NBytes / disk.BlockSize
 	for b := uint64(0); b < blocks; b++ {
@@ -500,7 +502,7 @@ func (fs Fs) Remove(dirI Inum, name string) bool {
 			return false
 		}
 	}
-	fs.flushInode(op, i, inode{Kind: INODE_KIND_FREE})
+	fs.flushInode(op, i, &inode{Kind: INODE_KIND_FREE})
 	ok := fs.removeLink(op, dir, name)
 	if !ok {
 		return false
