@@ -139,12 +139,12 @@ func (ino inode) btoa(boff uint64) Bnum {
 	return ino.Direct[boff]
 }
 
-func (fs Fs) inodeRead(ino inode, boff uint64) disk.Block {
-	return fs.log.Read(fs.sb.inodeBase + ino.btoa(boff))
+func (fs Fs) inodeRead(ino *inode, boff uint64) disk.Block {
+	return fs.log.Read(fs.sb.dataBase + ino.btoa(boff) - 1)
 }
 
-func (fs Fs) inodeWrite(op *awol.Op, ino inode, boff uint64, b disk.Block) {
-	op.Write(fs.sb.inodeBase+ino.btoa(boff), b)
+func (fs Fs) inodeWrite(op *awol.Op, ino *inode, boff uint64, b disk.Block) {
+	op.Write(fs.sb.dataBase+ino.btoa(boff)-1, b)
 }
 
 func (fs Fs) checkInode(i Inum) {
