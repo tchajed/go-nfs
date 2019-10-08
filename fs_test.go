@@ -1,7 +1,6 @@
 package nfs
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -16,6 +15,7 @@ type FsSuite struct {
 func (suite *FsSuite) SetupTest() {
 	log := mem.New(10 * 1000)
 	suite.fs = NewFs(log)
+	//fmt.Printf("fs: %+v\n", suite.fs.sb)
 }
 
 func (suite *FsSuite) TestGetRoot() {
@@ -28,7 +28,6 @@ func (suite *FsSuite) TestGetRoot() {
 
 func (suite *FsSuite) TestCreateFile() {
 	fs := suite.fs
-	fmt.Printf("fs: %+v\n", fs.sb)
 	root := fs.RootInode()
 	i1, ok := fs.Create(root, "foo", false)
 	suite.Require().True(ok)

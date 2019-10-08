@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/tchajed/go-awol"
-	"github.com/tchajed/go-awol/mem"
 	"github.com/tchajed/goose/machine/disk"
 
 	"github.com/tchajed/go-nfs/balloc"
@@ -101,14 +100,12 @@ func NewFs(log Log) Fs {
 		encodeInode(newInode(INODE_KIND_DIR)))
 	log.Commit(op)
 
-	mem.Debug = false
 	freeInode := encodeInode(newInode(INODE_KIND_FREE))
 	for i := Inum(2); i < sb.numInodes; i++ {
 		op := log.Begin()
 		op.Write(sb.inodeBase+(i-1), freeInode)
 		log.Commit(op)
 	}
-	mem.Debug = true
 	return Fs{log: log, sb: sb}
 }
 
